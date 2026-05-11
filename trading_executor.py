@@ -97,6 +97,8 @@ class TradingExecutor:
 
         step_size, min_qty = self._get_lot_size(symbol)
         quantity           = self._round_step(raw_qty, step_size)
+        qty_precision      = max(0, round(-math.log10(step_size))) if step_size > 0 else 8
+        qty_str            = f"{quantity:.{qty_precision}f}"
 
         if quantity < min_qty:
             capital_minimo = (min_qty * entry_price) / (RISK_PCT_OF_CAPITAL / 100)
@@ -121,9 +123,9 @@ class TradingExecutor:
         # 3 — Orden de mercado
         try:
             if side == 'BUY':
-                resp = self.client.order_market_buy(symbol=symbol, quantity=quantity)
+                resp = self.client.order_market_buy(symbol=symbol, quantity=qty_str)
             else:
-                resp = self.client.order_market_sell(symbol=symbol, quantity=quantity)
+                resp = self.client.order_market_sell(symbol=symbol, quantity=qty_str)
 
             # Precio real de ejecución (media ponderada de fills)
             fills = resp.get('fills', [])
@@ -155,7 +157,7 @@ class TradingExecutor:
             self.client.create_oco_order(
                 symbol=symbol,
                 side=exit_side,
-                quantity=quantity,
+                quantity=qty_str,
                 price=str(tp_price),
                 stopPrice=str(sl_price),
                 stopLimitPrice=str(sl_price),
