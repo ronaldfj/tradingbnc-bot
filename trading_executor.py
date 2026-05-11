@@ -146,29 +146,20 @@ class TradingExecutor:
             exit_side = 'BUY'
 
         try:
-            self.client.create_order(
+            self.client.create_oco_order(
                 symbol=symbol,
                 side=exit_side,
-                type='TAKE_PROFIT_LIMIT',
                 quantity=quantity,
                 price=str(tp_price),
-                stopPrice=str(tp_price),
-                timeInForce='GTC',
-            )
-            self.client.create_order(
-                symbol=symbol,
-                side=exit_side,
-                type='STOP_LOSS_LIMIT',
-                quantity=quantity,
-                price=str(sl_price),
                 stopPrice=str(sl_price),
-                timeInForce='GTC',
+                stopLimitPrice=str(sl_price),
+                stopLimitTimeInForce='GTC',
             )
-            logger.info(f"TP ${tp_price} / SL ${sl_price} configurados")
+            logger.info(f"OCO colocado — TP ${tp_price} / SL ${sl_price}")
             await self.report(f"🎯 TP ${tp_price:,.2f} / 🛑 SL ${sl_price:,.2f}")
         except BinanceAPIException as e:
-            logger.error(f"Error TP/SL: {e}")
-            await self.report(f"⚠️ Orden entrada OK pero error en TP/SL: {e}")
+            logger.error(f"Error OCO: {e}")
+            await self.report(f"⚠️ Orden entrada OK pero error en OCO: {e}")
 
     # ── Reporte ───────────────────────────────────────────────────────────────
     async def report(self, message):
