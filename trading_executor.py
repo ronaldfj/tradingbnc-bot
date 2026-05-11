@@ -92,24 +92,29 @@ class TradingExecutor:
             logger.error(f"Error obteniendo balance: {e}")
             return
 
-        riesgo_usd      = capital_usd * (RISK_PCT_OF_CAPITAL / 100)
-        sl_distance_usd = entry_price * (sl_pct / 100)
-        raw_qty         = riesgo_usd / sl_distance_usd
+        position_usd = capital_usd * (RISK_PCT_OF_CAPITAL / 100)
+        raw_qty      = position_usd / entry_price
 
         step_size, min_qty = self._get_lot_size(symbol)
         quantity           = self._round_step(raw_qty, step_size)
 
         if quantity < min_qty:
-            msg = (f"Cantidad calculada {quantity} < mínimo {min_qty} para {symbol}. "
-                   f"Sube RISK_PCT_OF_CAPITAL o revisa el par.")
+            capital_minimo = (min_qty * entry_price) / (RISK_PCT_OF_CAPITAL / 100)
+            msg = (
+                f"Sizing fallido para {symbol}\n"
+                f"  Capital USDT: ${capital_usd:.2f} | Posición: {RISK_PCT_OF_CAPITAL}% = ${position_usd:.4f}\n"
+                f"  Precio entrada: ${entry_price:,.2f}\n"
+                f"  qty calculada: {raw_qty:.8f} → redondeada: {quantity} (mínimo: {min_qty})\n"
+                f"  Capital mínimo necesario con {RISK_PCT_OF_CAPITAL}%: ${capital_minimo:.2f} USDT"
+            )
             logger.error(msg)
             await self.report(f"⚠️ {msg}")
             return
 
         cost_usd = quantity * entry_price
         logger.info(
-            f"Sizing: capital=${capital_usd:.2f} riesgo={RISK_PCT_OF_CAPITAL}%"
-            f"=${riesgo_usd:.2f} sl={sl_pct}% entry={entry_price}"
+            f"Sizing: capital=${capital_usd:.2f} posición={RISK_PCT_OF_CAPITAL}%"
+            f"=${position_usd:.2f} entry=${entry_price:,.2f}"
             f" → qty={quantity} (~${cost_usd:.2f} USDT)"
         )
 
