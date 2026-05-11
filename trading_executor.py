@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 API_KEY            = os.getenv('BINANCE_API_KEY')
 API_SECRET         = os.getenv('BINANCE_API_SECRET')
 TESTNET            = os.getenv('BINANCE_TESTNET', 'True').lower() == 'true'
-RISK_PCT_OF_CAPITAL = float(os.getenv('RISK_PCT_OF_CAPITAL', '2.0'))
+TRADE_SIZE_USD = float(os.getenv('TRADE_SIZE_USD', '10.0'))
 
 
 class TradingExecutor:
@@ -25,7 +25,7 @@ class TradingExecutor:
             logger.info("Modo TESTNET (simulación)")
         else:
             self.client = Client(API_KEY, API_SECRET)
-            logger.info(f"Modo REAL | Riesgo por trade: {RISK_PCT_OF_CAPITAL}% del capital")
+            logger.info(f"Modo REAL | Tamaño por trade: ${TRADE_SIZE_USD:.2f} USDT")
 
     # ── Arranque ──────────────────────────────────────────────────────────────
     async def start(self):
@@ -69,6 +69,17 @@ class TradingExecutor:
             pass
         return 2
 
+    def _get_min_notional(self, symbol: str) -> float:
+        """Valor mínimo de la orden en USDT (MIN_NOTIONAL o NOTIONAL filter)."""
+        try:
+            info = self.client.get_symbol_info(symbol)
+            for f in info['filters']:
+                if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL'):
+                    return float(f.get('minNotional', f.get('minVal', 0)))
+        except Exception:
+            pass
+        return 5.0  # fallback conservador
+
     # ── Ejecución ─────────────────────────────────────────────────────────────
     async def execute_order(self, order):
         symbol   = order['symbol']
@@ -84,16 +95,8 @@ class TradingExecutor:
             logger.error(f"Error obteniendo precio: {e}")
             return
 
-        # 2 — Sizing basado en % del capital disponible
-        try:
-            balance     = self.client.get_asset_balance(asset='USDT')
-            capital_usd = float(balance['free'])
-        except BinanceAPIException as e:
-            logger.error(f"Error obteniendo balance: {e}")
-            return
-
-        position_usd = capital_usd * (RISK_PCT_OF_CAPITAL / 100)
-        raw_qty      = position_usd / entry_price
+        # 2 — Sizing fijo en USDT
+        raw_qty      = TRADE_SIZE_USD / entry_price
 
         step_size, min_qty = self._get_lot_size(symbol)
         quantity           = self._round_step(raw_qty, step_size)
@@ -101,24 +104,33 @@ class TradingExecutor:
         qty_str            = f"{quantity:.{qty_precision}f}"
 
         if quantity < min_qty:
-            capital_minimo = (min_qty * entry_price) / (RISK_PCT_OF_CAPITAL / 100)
             msg = (
                 f"Sizing fallido para {symbol}\n"
-                f"  Capital USDT: ${capital_usd:.2f} | Posición: {RISK_PCT_OF_CAPITAL}% = ${position_usd:.4f}\n"
-                f"  Precio entrada: ${entry_price:,.2f}\n"
+                f"  Trade size: ${TRADE_SIZE_USD:.2f} USDT | Precio entrada: ${entry_price:,.2f}\n"
                 f"  qty calculada: {raw_qty:.8f} → redondeada: {quantity} (mínimo: {min_qty})\n"
-                f"  Capital mínimo necesario con {RISK_PCT_OF_CAPITAL}%: ${capital_minimo:.2f} USDT"
+                f"  Trade size mínimo necesario: ${min_qty * entry_price:.2f} USDT"
             )
             logger.error(msg)
             await self.report(f"⚠️ {msg}")
             return
 
-        cost_usd = quantity * entry_price
+        cost_usd     = quantity * entry_price
+        min_notional = self._get_min_notional(symbol)
         logger.info(
-            f"Sizing: capital=${capital_usd:.2f} posición={RISK_PCT_OF_CAPITAL}%"
-            f"=${position_usd:.2f} entry=${entry_price:,.2f}"
-            f" → qty={quantity} (~${cost_usd:.2f} USDT)"
+            f"Sizing: trade=${TRADE_SIZE_USD:.2f} entry=${entry_price:,.2f}"
+            f" → qty={qty_str} (~${cost_usd:.2f} USDT, mín notional=${min_notional:.2f})"
         )
+
+        if cost_usd < min_notional:
+            msg = (
+                f"Notional insuficiente para {symbol}\n"
+                f"  Orden: {qty_str} × ${entry_price:,.2f} = ${cost_usd:.2f} USDT\n"
+                f"  Mínimo requerido: ${min_notional:.2f} USDT\n"
+                f"  Subí TRADE_SIZE_USD a al menos ${min_notional:.2f} en el .env"
+            )
+            logger.error(msg)
+            await self.report(f"⚠️ {msg}")
+            return
 
         # 3 — Orden de mercado
         try:
