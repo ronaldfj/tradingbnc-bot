@@ -111,14 +111,23 @@ class TradingExecutor:
                 resp = self.client.order_market_buy(symbol=symbol, quantity=quantity)
             else:
                 resp = self.client.order_market_sell(symbol=symbol, quantity=quantity)
+
+            # Precio real de ejecución (media ponderada de fills)
+            fills = resp.get('fills', [])
+            if fills:
+                total_qty  = sum(float(f['qty']) for f in fills)
+                entry_price = sum(float(f['price']) * float(f['qty']) for f in fills) / total_qty
+            # Si no hay fills (testnet puede no devolverlos), entry_price queda del ticker
+
+            cost_usd = quantity * entry_price
             logger.info(f"Orden ejecutada: {resp}")
-            await self.report(f"✅ Entrada {side} {symbol} a ${entry_price:,.2f} | qty={quantity} | costo ~${cost_usd:.2f}")
+            await self.report(f"✅ Entrada {side} {symbol} a ${entry_price:,.4f} | qty={quantity} | costo ~${cost_usd:.2f}")
         except BinanceAPIException as e:
             logger.error(f"Error en orden: {e}")
             await self.report(f"❌ Error entrada {symbol}: {e}")
             return
 
-        # 4 — TP y SL al precio actual
+        # 4 — TP y SL al precio real de entrada
         price_precision = self._get_price_precision(symbol)
         if side == 'BUY':
             tp_price = round(entry_price * (1 + tp_pct / 100), price_precision)
