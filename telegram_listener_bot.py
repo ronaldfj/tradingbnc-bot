@@ -136,6 +136,13 @@ class TelegramBotListener:
             logger.error(f"❌ Error en _parse_raw_callback: {e}")
             return None
 
+    # ── Reporte hacia Telegram ────────────────────────────────────────────────
+    async def send_report(self, message: str):
+        try:
+            await self.app.bot.send_message(chat_id=CHANNEL_ID, text=message)
+        except Exception as e:
+            logger.error(f"Error enviando reporte a Telegram: {e}")
+
     # ── Parada ────────────────────────────────────────────────────────────────
     async def stop(self):
         await self.app.updater.stop()

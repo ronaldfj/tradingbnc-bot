@@ -17,8 +17,9 @@ RISK_PCT_OF_CAPITAL = float(os.getenv('RISK_PCT_OF_CAPITAL', '2.0'))
 
 
 class TradingExecutor:
-    def __init__(self, order_queue):
+    def __init__(self, order_queue, notify_fn=None):
         self.order_queue = order_queue
+        self.notify_fn = notify_fn
         if TESTNET:
             self.client = Client(API_KEY, API_SECRET, testnet=True)
             logger.info("Modo TESTNET (simulación)")
@@ -163,4 +164,6 @@ class TradingExecutor:
 
     # ── Reporte ───────────────────────────────────────────────────────────────
     async def report(self, message):
-        print(f"📢 Reporte: {message}")
+        logger.info(f"Reporte: {message}")
+        if self.notify_fn:
+            await self.notify_fn(message)
