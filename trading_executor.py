@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 API_KEY            = os.getenv('BINANCE_API_KEY')
 API_SECRET         = os.getenv('BINANCE_API_SECRET')
 TESTNET            = os.getenv('BINANCE_TESTNET', 'True').lower() == 'true'
-RISK_PER_TRADE_USD = float(os.getenv('RISK_PER_TRADE_USD', '10.0'))
+RISK_PCT_OF_CAPITAL = float(os.getenv('RISK_PCT_OF_CAPITAL', '2.0'))
 
 
 class TradingExecutor:
@@ -24,7 +24,7 @@ class TradingExecutor:
             logger.info("Modo TESTNET (simulación)")
         else:
             self.client = Client(API_KEY, API_SECRET)
-            logger.info(f"Modo REAL | Riesgo por trade: ${RISK_PER_TRADE_USD}")
+            logger.info(f"Modo REAL | Riesgo por trade: {RISK_PCT_OF_CAPITAL}% del capital")
 
     # ── Arranque ──────────────────────────────────────────────────────────────
     async def start(self):
@@ -83,26 +83,33 @@ class TradingExecutor:
             logger.error(f"Error obteniendo precio: {e}")
             return
 
-        # 2 — Cantidad recalculada al precio actual
-        #     qty = RISK_PER_TRADE_USD / (entry_price × sl_pct / 100)
-        #     Así si BTC sube, la cantidad baja automáticamente.
+        # 2 — Sizing basado en % del capital disponible
+        try:
+            balance     = self.client.get_asset_balance(asset='USDT')
+            capital_usd = float(balance['free'])
+        except BinanceAPIException as e:
+            logger.error(f"Error obteniendo balance: {e}")
+            return
+
+        riesgo_usd      = capital_usd * (RISK_PCT_OF_CAPITAL / 100)
         sl_distance_usd = entry_price * (sl_pct / 100)
-        raw_qty         = RISK_PER_TRADE_USD / sl_distance_usd
+        raw_qty         = riesgo_usd / sl_distance_usd
 
         step_size, min_qty = self._get_lot_size(symbol)
         quantity           = self._round_step(raw_qty, step_size)
 
         if quantity < min_qty:
             msg = (f"Cantidad calculada {quantity} < mínimo {min_qty} para {symbol}. "
-                   f"Sube RISK_PER_TRADE_USD o revisa el par.")
+                   f"Sube RISK_PCT_OF_CAPITAL o revisa el par.")
             logger.error(msg)
             await self.report(f"⚠️ {msg}")
             return
 
         cost_usd = quantity * entry_price
         logger.info(
-            f"Sizing: entry={entry_price} sl_pct={sl_pct}% "
-            f"→ qty={quantity} (~${cost_usd:.2f} USDT)"
+            f"Sizing: capital=${capital_usd:.2f} riesgo={RISK_PCT_OF_CAPITAL}%"
+            f"=${riesgo_usd:.2f} sl={sl_pct}% entry={entry_price}"
+            f" → qty={quantity} (~${cost_usd:.2f} USDT)"
         )
 
         # 3 — Orden de mercado
