@@ -146,9 +146,17 @@ class TradingExecutor:
                 entry_price = sum(float(f['price']) * float(f['qty']) for f in fills) / total_qty
             # Si no hay fills (testnet puede no devolverlos), entry_price queda del ticker
 
-            cost_usd = quantity * entry_price
+            cost_usd  = quantity * entry_price
+            order_id  = resp.get('orderId', '?')
+            status    = resp.get('status', '?')
             logger.info(f"Orden ejecutada: {resp}")
-            await self.report(f"✅ Entrada {side} {symbol} a ${entry_price:,.4f} | qty={quantity} | costo ~${cost_usd:.2f}")
+            await self.report(
+                f"✅ Entrada ejecutada\n"
+                f"  Par: {symbol} | Dir: {'LONG' if side == 'BUY' else 'SHORT'}\n"
+                f"  ID: {order_id} | Estado: {status}\n"
+                f"  Precio: ${entry_price:,.4f} | Qty: {qty_str}\n"
+                f"  Costo: ~${cost_usd:.2f} USDT"
+            )
         except BinanceAPIException as e:
             logger.error(f"Error en orden: {e}")
             await self.report(f"❌ Error entrada {symbol}: {e}")
@@ -185,9 +193,18 @@ class TradingExecutor:
                     aboveTimeInForce='GTC',
                     belowType='LIMIT_MAKER', belowPrice=str(tp_price),
                 )
-            self.client._post('orderList/oco', signed=True, data=oco_params)
-            logger.info(f"OCO colocado — TP ${tp_price} / SL ${sl_price}")
-            await self.report(f"🎯 TP ${tp_price:,.2f} / 🛑 SL ${sl_price:,.2f}")
+            oco_resp   = self.client._post('orderList/oco', signed=True, data=oco_params)
+            list_id    = oco_resp.get('orderListId', '?')
+            oco_status = oco_resp.get('listStatusType', '?')
+            orders     = oco_resp.get('orders', [])
+            ids        = ' / '.join(str(o['orderId']) for o in orders) if orders else '?'
+            logger.info(f"OCO colocado — TP ${tp_price} / SL ${sl_price} | resp: {oco_resp}")
+            await self.report(
+                f"🎯 OCO colocado\n"
+                f"  ListID: {list_id} | Estado: {oco_status}\n"
+                f"  IDs órdenes: {ids}\n"
+                f"  TP: ${tp_price:,.2f} (+{tp_pct}%) | SL: ${sl_price:,.2f} (-{sl_pct}%)"
+            )
         except BinanceAPIException as e:
             logger.error(f"Error OCO: {e}")
             await self.report(f"⚠️ Orden entrada OK pero error en OCO: {e}")
