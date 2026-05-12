@@ -142,9 +142,14 @@ class TradingExecutor:
             # Precio real de ejecución (media ponderada de fills)
             fills = resp.get('fills', [])
             if fills:
-                total_qty  = sum(float(f['qty']) for f in fills)
+                total_qty   = sum(float(f['qty']) for f in fills)
                 entry_price = sum(float(f['price']) * float(f['qty']) for f in fills) / total_qty
-            # Si no hay fills (testnet puede no devolverlos), entry_price queda del ticker
+                # Descuenta comisión cobrada en el activo base (ej. TON, BTC)
+                base_asset  = symbol.replace('USDT', '')
+                commission  = sum(float(f['commission']) for f in fills if f.get('commissionAsset') == base_asset)
+                net_qty     = self._round_step(total_qty - commission, step_size)
+                qty_str     = f"{net_qty:.{qty_precision}f}"
+            # Si no hay fills (testnet), qty_str y entry_price quedan del cálculo previo
 
             cost_usd  = quantity * entry_price
             order_id  = resp.get('orderId', '?')
