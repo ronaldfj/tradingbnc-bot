@@ -166,15 +166,26 @@ class TradingExecutor:
             exit_side = 'BUY'
 
         try:
-            self.client.create_oco_order(
-                symbol=symbol,
-                side=exit_side,
-                quantity=qty_str,
-                price=str(tp_price),
-                stopPrice=str(sl_price),
-                stopLimitPrice=str(sl_price),
-                stopLimitTimeInForce='GTC',
-            )
+            # Nueva API Binance: /api/v3/orderList/oco requiere aboveType/belowType
+            if exit_side == 'SELL':
+                # Salida LONG: TP arriba (LIMIT_MAKER), SL abajo (STOP_LOSS_LIMIT)
+                oco_params = dict(
+                    symbol=symbol, side='SELL', quantity=qty_str,
+                    aboveType='LIMIT_MAKER', abovePrice=str(tp_price),
+                    belowType='STOP_LOSS_LIMIT',
+                    belowStopPrice=str(sl_price), belowPrice=str(sl_price),
+                    belowTimeInForce='GTC',
+                )
+            else:
+                # Salida SHORT: SL arriba (STOP_LOSS_LIMIT), TP abajo (LIMIT_MAKER)
+                oco_params = dict(
+                    symbol=symbol, side='BUY', quantity=qty_str,
+                    aboveType='STOP_LOSS_LIMIT',
+                    aboveStopPrice=str(sl_price), abovePrice=str(sl_price),
+                    aboveTimeInForce='GTC',
+                    belowType='LIMIT_MAKER', belowPrice=str(tp_price),
+                )
+            self.client._post('orderList/oco', signed=True, data=oco_params)
             logger.info(f"OCO colocado — TP ${tp_price} / SL ${sl_price}")
             await self.report(f"🎯 TP ${tp_price:,.2f} / 🛑 SL ${sl_price:,.2f}")
         except BinanceAPIException as e:
