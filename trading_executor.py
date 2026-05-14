@@ -132,7 +132,35 @@ class TradingExecutor:
             await self.report(f"⚠️ {msg}")
             return
 
-        # 3 — Orden de mercado
+        # 3 — Verificar saldo antes de operar
+        try:
+            base_asset_check = symbol.replace('USDT', '')
+            account = self.client.get_account()
+            balances = {b['asset']: float(b['free']) for b in account['balances'] if float(b['free']) > 0}
+            usdt_free = balances.get('USDT', 0.0)
+            base_free = balances.get(base_asset_check, 0.0)
+            logger.info(f"Saldo disponible — USDT: {usdt_free:.2f} | {base_asset_check}: {base_free:.6f}")
+
+            if side == 'BUY' and usdt_free < cost_usd:
+                msg = (
+                    f"Saldo insuficiente para {symbol}\n"
+                    f"  Necesario: ${cost_usd:.2f} USDT | Disponible: ${usdt_free:.2f} USDT"
+                )
+                logger.error(msg)
+                await self.report(f"⚠️ {msg}")
+                return
+            if side == 'SELL' and base_free < quantity:
+                msg = (
+                    f"Saldo insuficiente de {base_asset_check} para {symbol}\n"
+                    f"  Necesario: {quantity} | Disponible: {base_free:.6f}"
+                )
+                logger.error(msg)
+                await self.report(f"⚠️ {msg}")
+                return
+        except BinanceAPIException as e:
+            logger.warning(f"No se pudo verificar saldo: {e}")
+
+        # 4 — Orden de mercado
         try:
             if side == 'BUY':
                 resp = self.client.order_market_buy(symbol=symbol, quantity=qty_str)
@@ -144,12 +172,24 @@ class TradingExecutor:
             if fills:
                 total_qty   = sum(float(f['qty']) for f in fills)
                 entry_price = sum(float(f['price']) * float(f['qty']) for f in fills) / total_qty
-                # Descuenta comisión cobrada en el activo base (ej. TON, BTC)
-                base_asset  = symbol.replace('USDT', '')
-                commission  = sum(float(f['commission']) for f in fills if f.get('commissionAsset') == base_asset)
-                net_qty     = self._round_step(total_qty - commission, step_size)
-                qty_str     = f"{net_qty:.{qty_precision}f}"
-            # Si no hay fills (testnet), qty_str y entry_price quedan del cálculo previo
+
+            # Saldo real disponible después de la orden (fuente de verdad para la OCO)
+            base_asset = symbol.replace('USDT', '')
+            try:
+                acct      = self.client.get_account()
+                available = next(
+                    (float(b['free']) for b in acct['balances'] if b['asset'] == base_asset), 0.0
+                )
+                safe_qty  = self._round_step(available, step_size)
+                qty_str   = f"{safe_qty:.{qty_precision}f}"
+                logger.info(f"Saldo real post-compra: {available:.8f} {base_asset} → OCO qty: {qty_str}")
+            except Exception as e:
+                logger.warning(f"No se pudo leer saldo post-compra: {e}")
+                # fallback: descontar comisión de fills
+                if fills:
+                    commission = sum(float(f['commission']) for f in fills if f.get('commissionAsset') == base_asset)
+                    net_qty    = self._round_step(total_qty - commission, step_size)
+                    qty_str    = f"{net_qty:.{qty_precision}f}"
 
             cost_usd  = quantity * entry_price
             order_id  = resp.get('orderId', '?')
@@ -167,7 +207,7 @@ class TradingExecutor:
             await self.report(f"❌ Error entrada {symbol}: {e}")
             return
 
-        # 4 — TP y SL al precio real de entrada
+        # 5 — TP y SL al precio real de entrada
         price_precision = self._get_price_precision(symbol)
         if side == 'BUY':
             tp_price = round(entry_price * (1 + tp_pct / 100), price_precision)
