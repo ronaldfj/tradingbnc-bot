@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 show *)",
+      "Bash(python3 -m pytest tests/ -v)",
+      "Bash(python3 -c \"import binance; print\\('binance module at:', binance.__file__\\)\")",
+      "Bash(git log *)"
+    ]
+  }
+}
