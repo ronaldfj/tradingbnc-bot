@@ -1,3 +1,8 @@
+"""
+Consume órdenes de una cola y ejecuta el ciclo de vida completo en Binance:
+sizing en USDT fijo -> validación de saldo -> orden de mercado -> OCO de TP/SL.
+Ver CLAUDE.md para el detalle de arquitectura y el porqué de cada decisión.
+"""
 import asyncio
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
@@ -17,6 +22,11 @@ TRADE_SIZE_USD = float(os.getenv('TRADE_SIZE_USD', '10.0'))
 
 
 class TradingExecutor:
+    """
+    Un TradingExecutor por bot. `notify_fn` es la función async usada para
+    reportar progreso/errores hacia afuera (normalmente TelegramBotListener.send_report).
+    """
+
     def __init__(self, order_queue, notify_fn=None):
         self.order_queue = order_queue
         self.notify_fn = notify_fn
@@ -33,55 +43,72 @@ class TradingExecutor:
         while True:
             order = await self.order_queue.get()
             logger.info(f"Procesando orden: {order}")
-            await self.execute_order(order)
+            try:
+                await self.execute_order(order)
+            except Exception as e:
+                # Una orden individual mal formada o un error inesperado no debe
+                # tumbar el loop entero (y con él, todo el bot vía asyncio.gather).
+                logger.exception(f"Error inesperado procesando orden {order}: {e}")
+                await self.report(f"❌ Error inesperado procesando orden: {e}")
 
     # ── Helpers de precisión Binance ──────────────────────────────────────────
-    def _get_lot_size(self, symbol: str):
-        """
-        Devuelve (step_size, min_qty) del LOT_SIZE filter para el símbolo.
-        step_size define cuántos decimales acepta Binance para la cantidad.
-        """
-        try:
-            info = self.client.get_symbol_info(symbol)
-            for f in info['filters']:
-                if f['filterType'] == 'LOT_SIZE':
-                    return float(f['stepSize']), float(f['minQty'])
-        except Exception:
-            pass
-        return 0.00001, 0.00001  # fallback conservador
+    def _precision_from_step(self, step: float, default: int = 8) -> int:
+        """Decimales que admite un step/tick size de Binance (ej. 0.00001 → 5)."""
+        if step <= 0:
+            return default
+        return max(0, round(-math.log10(step)))
 
     def _round_step(self, qty: float, step: float) -> float:
         """Redondea qty al step_size correcto sin notación científica."""
         if step <= 0:
             return qty
-        precision = max(0, round(-math.log10(step)))
+        precision = self._precision_from_step(step)
         return round(math.floor(qty / step) * step, precision)
 
-    def _get_price_precision(self, symbol: str) -> int:
-        """Decimales permitidos para el precio (PRICE_FILTER → tickSize)."""
+    def _get_symbol_filters(self, symbol: str) -> dict:
+        """
+        Lee de una sola vez los filtros de Binance necesarios para dimensionar
+        y validar una orden (antes se llamaba get_symbol_info por separado para
+        step_size, tick_size y min_notional: 3 requests por orden). Si Binance
+        no responde o cambia el formato de filtros, cae a valores conservadores
+        y deja constancia en el log en vez de fallar en silencio.
+        """
         try:
             info = self.client.get_symbol_info(symbol)
-            for f in info['filters']:
-                if f['filterType'] == 'PRICE_FILTER':
-                    tick = float(f['tickSize'])
-                    return max(0, round(-math.log10(tick)))
-        except Exception:
-            pass
-        return 2
+            filters = {f['filterType']: f for f in info['filters']}
 
-    def _get_min_notional(self, symbol: str) -> float:
-        """Valor mínimo de la orden en USDT (MIN_NOTIONAL o NOTIONAL filter)."""
-        try:
-            info = self.client.get_symbol_info(symbol)
-            for f in info['filters']:
-                if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL'):
-                    return float(f.get('minNotional', f.get('minVal', 0)))
-        except Exception:
-            pass
-        return 5.0  # fallback conservador
+            step_size = float(filters['LOT_SIZE']['stepSize'])
+            min_qty = float(filters['LOT_SIZE']['minQty'])
+            tick_size = float(filters['PRICE_FILTER']['tickSize'])
+
+            notional_filter = filters.get('MIN_NOTIONAL') or filters.get('NOTIONAL') or {}
+            min_notional = float(notional_filter.get('minNotional', notional_filter.get('minVal', 0))) or 5.0
+
+            return {
+                'step_size': step_size,
+                'min_qty': min_qty,
+                'price_precision': self._precision_from_step(tick_size, default=2),
+                'min_notional': min_notional,
+                'base_asset': info.get('baseAsset') or symbol.replace('USDT', ''),
+            }
+        except Exception as e:
+            logger.warning(f"No se pudieron leer los filtros de {symbol}, usando fallback conservador: {e}")
+            return {
+                'step_size': 0.00001,
+                'min_qty': 0.00001,
+                'price_precision': 2,
+                'min_notional': 5.0,
+                'base_asset': symbol.replace('USDT', ''),
+            }
 
     # ── Ejecución ─────────────────────────────────────────────────────────────
     async def execute_order(self, order):
+        """
+        Ciclo de vida completo de una orden:
+        1) precio actual, 2) sizing en TRADE_SIZE_USD + validación de mínimos,
+        3) verificación de saldo, 4) orden de mercado, 5) OCO de TP/SL al
+        precio real de fill. Cualquier fallo reporta y corta ahí (no reintenta).
+        """
         symbol   = order['symbol']
         side     = order['side']           # 'BUY' | 'SELL'
         tp_pct   = order['tp_percent']     # porcentaje, ej: 4.11
@@ -96,12 +123,15 @@ class TradingExecutor:
             return
 
         # 2 — Sizing fijo en USDT
-        raw_qty      = TRADE_SIZE_USD / entry_price
+        raw_qty = TRADE_SIZE_USD / entry_price
 
-        step_size, min_qty = self._get_lot_size(symbol)
-        quantity           = self._round_step(raw_qty, step_size)
-        qty_precision      = max(0, round(-math.log10(step_size))) if step_size > 0 else 8
-        qty_str            = f"{quantity:.{qty_precision}f}"
+        filters       = self._get_symbol_filters(symbol)
+        step_size     = filters['step_size']
+        min_qty       = filters['min_qty']
+        base_asset    = filters['base_asset']
+        quantity      = self._round_step(raw_qty, step_size)
+        qty_precision = self._precision_from_step(step_size)
+        qty_str       = f"{quantity:.{qty_precision}f}"
 
         if quantity < min_qty:
             msg = (
@@ -115,7 +145,7 @@ class TradingExecutor:
             return
 
         cost_usd     = quantity * entry_price
-        min_notional = self._get_min_notional(symbol)
+        min_notional = filters['min_notional']
         logger.info(
             f"Sizing: trade=${TRADE_SIZE_USD:.2f} entry=${entry_price:,.2f}"
             f" → qty={qty_str} (~${cost_usd:.2f} USDT, mín notional=${min_notional:.2f})"
@@ -134,12 +164,11 @@ class TradingExecutor:
 
         # 3 — Verificar saldo antes de operar
         try:
-            base_asset_check = symbol.replace('USDT', '')
             account = self.client.get_account()
             balances = {b['asset']: float(b['free']) for b in account['balances'] if float(b['free']) > 0}
             usdt_free = balances.get('USDT', 0.0)
-            base_free = balances.get(base_asset_check, 0.0)
-            logger.info(f"Saldo disponible — USDT: {usdt_free:.2f} | {base_asset_check}: {base_free:.6f}")
+            base_free = balances.get(base_asset, 0.0)
+            logger.info(f"Saldo disponible — USDT: {usdt_free:.2f} | {base_asset}: {base_free:.6f}")
 
             if side == 'BUY' and usdt_free < cost_usd:
                 msg = (
@@ -151,7 +180,7 @@ class TradingExecutor:
                 return
             if side == 'SELL' and base_free < quantity:
                 msg = (
-                    f"Saldo insuficiente de {base_asset_check} para {symbol}\n"
+                    f"Saldo insuficiente de {base_asset} para {symbol}\n"
                     f"  Necesario: {quantity} | Disponible: {base_free:.6f}"
                 )
                 logger.error(msg)
@@ -174,7 +203,6 @@ class TradingExecutor:
                 entry_price = sum(float(f['price']) * float(f['qty']) for f in fills) / total_qty
 
             # Saldo real disponible después de la orden (fuente de verdad para la OCO)
-            base_asset = symbol.replace('USDT', '')
             try:
                 acct      = self.client.get_account()
                 available = next(
@@ -208,7 +236,7 @@ class TradingExecutor:
             return
 
         # 5 — TP y SL al precio real de entrada
-        price_precision = self._get_price_precision(symbol)
+        price_precision = filters['price_precision']
         if side == 'BUY':
             tp_price = round(entry_price * (1 + tp_pct / 100), price_precision)
             sl_price = round(entry_price * (1 - sl_pct / 100), price_precision)

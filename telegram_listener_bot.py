@@ -16,6 +16,12 @@ CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")  # '@micanal' o -1001234567890
 
 
 class TelegramBotListener:
+    """
+    Escucha un canal de Telegram vía Bot API y encola órdenes parseadas para
+    que TradingExecutor las ejecute. También reporta resultados de vuelta al
+    mismo chat a través de `send_report` (pasado como `notify_fn` al executor).
+    """
+
     def __init__(self, order_queue):
         self.order_queue = order_queue
         self.app = Application.builder().token(TOKEN).build()

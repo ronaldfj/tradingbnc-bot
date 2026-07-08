@@ -1,6 +1,7 @@
+"""Entrypoint: conecta el listener de Telegram con el executor de Binance vía una cola compartida."""
 import asyncio
 import logging
-from telegram_listener_bot import TelegramBotListener   # <--- nuevo nombre
+from telegram_listener_bot import TelegramBotListener
 from trading_executor import TradingExecutor
 
 logging.basicConfig(level=logging.INFO)
