@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 session_name.session
 logs.txt
+logs/

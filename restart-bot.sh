@@ -5,11 +5,12 @@
 # - Hace git stash pull (guarda cambios locales si los hay)
 # - Actualiza dependencias (si requirements.txt cambió)
 # - Verifica conectividad con Binance
-# - Reinicia la sesión tmux
+# - Reinicia el servicio systemd tradingbot
 # ------------------------------------------------------------
 
 REPO_DIR="/root/trading-bot"
-TMUX_SESSION="tradingbot"
+TMUX_SESSION="tradingbot"  # legado: solo para matar sesiones viejas
+SERVICE="tradingbot"
 BRANCH="main"
 LOG_FILE="/var/log/trading-bot-restart.log"
 
@@ -109,39 +110,34 @@ else
 fi
 
 # ------------------------------------------------------------
-# 5. Reiniciar el bot en tmux
+# 5. Reiniciar el bot vía systemd (arranca solo tras reboot/crash)
 # ------------------------------------------------------------
-log "🔄 Reiniciando el bot en sesión tmux..."
-
-# Matar sesión anterior si existe
-if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    log "⚡ Matando sesión tmux existente: $TMUX_SESSION"
-    tmux kill-session -t "$TMUX_SESSION"
-    sleep 1
-else
-    log "✅ No existía sesión previa."
-fi
-
-# Crear nueva sesión y ejecutar el bot
 if [ ! -d "$REPO_DIR/venv" ]; then
     log "❌ Error: No se encontró el entorno virtual en $REPO_DIR/venv"
     exit 1
 fi
 
-tmux new-session -d -s "$TMUX_SESSION"
-tmux send-keys -t "$TMUX_SESSION" "cd $REPO_DIR" C-m
-tmux send-keys -t "$TMUX_SESSION" "source venv/bin/activate" C-m
-tmux send-keys -t "$TMUX_SESSION" "python3 main.py" C-m
-
-# Pequeña pausa para verificar
-sleep 2
-
-# Verificar que la sesión se haya creado
+# Matar sesión tmux legada si existe, para no correr dos instancias
 if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    log "✅ Bot reiniciado exitosamente en tmux session '$TMUX_SESSION'."
-    log "📋 Para ver los logs: tmux attach -t $TMUX_SESSION"
+    log "⚡ Matando sesión tmux legada: $TMUX_SESSION"
+    tmux kill-session -t "$TMUX_SESSION"
+    sleep 1
+fi
+
+log "🔧 Instalando/actualizando unidad systemd $SERVICE..."
+cp "$REPO_DIR/deploy/$SERVICE.service" "/etc/systemd/system/$SERVICE.service"
+systemctl daemon-reload
+systemctl enable "$SERVICE" >> "$LOG_FILE" 2>&1
+
+log "🔄 Reiniciando servicio $SERVICE..."
+systemctl restart "$SERVICE"
+sleep 3
+
+if systemctl is-active --quiet "$SERVICE"; then
+    log "✅ Bot reiniciado exitosamente (systemd: $SERVICE)."
+    log "📋 Logs: journalctl -u $SERVICE -f   |   tail -f $REPO_DIR/logs/bot.log"
 else
-    log "❌ Falló la creación de la sesión tmux."
+    log "❌ El servicio $SERVICE no quedó activo. Revisa: journalctl -u $SERVICE -n 50"
     exit 1
 fi
 
